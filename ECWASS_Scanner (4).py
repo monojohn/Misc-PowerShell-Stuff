@@ -1,0 +1,1338 @@
+# -*- coding: ascii -*-
+# =============================================================================
+# ECWASS Web Application Security Scanner - Burp Suite Pro Extension
+# Version: 2.1  |  Compatible: Burp Suite Pro 2023.x/2024.x + Jython 2.7.3+
+# All 102 ECWASS controls | Selectable controls UI | Passive scan + CSV export
+# =============================================================================
+
+import re
+import datetime
+import java.io
+from java.io import FileOutputStream, OutputStreamWriter, BufferedWriter
+
+from burp import IBurpExtender, IScannerCheck, IScanIssue, ITab
+from burp import IContextMenuFactory, IHttpListener
+
+from java.awt import BorderLayout, Color, Font
+from java.awt.event import ActionListener
+from java.io import PrintWriter
+from java.net import URL as JavaURL
+from java.util import ArrayList, Arrays, Vector
+import javax.swing
+from javax.swing import (
+    BorderFactory, BoxLayout, JButton, JComboBox, JFileChooser,
+    JLabel, JMenuItem, JOptionPane, JPanel, JScrollPane,
+    JSplitPane, JTable, JTextArea, JTextField, JToolBar,
+    RowFilter, SwingUtilities, JTabbedPane
+)
+from javax.swing.event import ListSelectionListener, DocumentListener
+from javax.swing.table import DefaultTableModel, DefaultTableCellRenderer, TableRowSorter
+from java.lang import Boolean as JBoolean
+
+ALL_CONTROLS = [
+    # --- General Requirements ---
+    ("ECWASS-002","Web App","General Requirements","A new web application shall use a robust and recognized development framework.","Questionnaire",True),
+    ("ECWASS-003","Web App","General Requirements","The development team should use a development framework recommended by DIGIT.","Questionnaire",False),
+    ("ECWASS-004","Web App","General Requirements","A maintained version of the framework shall be used; by default, this should be the latest stable version of the framework.","Questionnaire",True),
+    ("ECWASS-005","Web App","General Requirements","Unsupported or deprecated client-side technologies shall not be used.","Technical",True),
+    ("ECWASS-006","Web App","General Requirements","All client side technologies not natively supported by browsers shall not be used.","Technical",True),
+    # --- Authentication ---
+    ("ECWASS-007","Web App","Authentication","Web applications should use EU Login to enforce authentication with a strength that satisfies the risk analysis and/or the required level of security.","Technical",False),
+    ("ECWASS-008","Web App","Authentication","If EU Login support is not implemented the web applications shall implement authentication mechanisms, with a strength that satisfies the risk analysis and/or the required level of security, as well as authorization checks that meet requirements established by the Password Technical Specification and the Access Control and Authentication Standard.","Technical",True),
+    ("ECWASS-009","Web App","Authentication","Web applications handling sensitive non-classified information shall use EU Login to enforce authentication with a strength that satisfies the risk analysis and/or the required level of security.","Technical",True),
+    ("ECWASS-010","Web App","Authentication","Administration pages of an application containing sensitive non-classified information shall have stricter security requirements which may justify the need for a re-authentication and/or for a stronger authentication.","Technical",True),
+    ("ECWASS-011","Web App","Authentication","Sensitive non-classified information, such as incorrect passwords, in case of failed login attempts, shall not be stored.","Questionnaire",True),
+    ("ECWASS-012","Web App","Authentication","Administrator functionality and/or interfaces shall not be accessible to unauthorized users.","Technical",True),
+    ("ECWASS-013","Web App","Authentication","Administration functionality and/or interfaces shall not be accessible from the Internet except for specific source IP addresses.","Questionnaire",True),
+    ("ECWASS-014","Web App","Authentication","Administration interfaces accessible from the Internet should use a random path instead of the default path","Technical",False),
+    ("ECWASS-015","Web App","Authentication","Default accounts shall be disabled.","Questionnaire",True),
+    ("ECWASS-016","Web App","Authentication","Administrators shall have a separate user and administrator role. Privileged functionalities shall only be available when the administrator is active.","Technical",True),
+    ("ECWASS-017","Web App","Authentication","Information provided in authentication error messages shall not reveal technical details about the underlying security mechanisms.","Technical",True),
+    ("ECWASS-018","Web App","Authentication","Information provided in authentication error messages shall not provide information about the existence of an account on the application.","Technical",True),
+    ("ECWASS-019","Web App","Authentication","Security secrets used by the web application itself (e.g. passwords, API keys, encryption keys, etc.) shall not be included in the source code or online repositories so that if the source code is leaked these secrets do not become public.","Questionnaire",True),
+    ("ECWASS-020","Web App","Authentication","User passwords used to authenticate shall be stored in a secure way, being at least hashed using a strong cryptographic hash function and the passwords shall be salted per user before hashing.","Questionnaire",True),
+    ("ECWASS-021","Web App","Authentication","Authentication controls shall be checked on the server side","Technical",True),
+    ("ECWASS-022","Web App","Authentication","Credentials used to authenticate shall be sent over HTTPS.","Technical",True),
+    ("ECWASS-023","Web App","Authentication","Modification of a user's credential shall require the user to enter the old password, new password and a confirmation of the new password; The password change functionality shall be accessible only by a secured logged-in session.","Technical",True),
+    ("ECWASS-024","Web App","Authentication","Account/password recovery controls should make use of a time-based one-time authentication token. The validity period shall be based on the business needs with a max of 24h validity.","Technical",False),
+    ("ECWASS-025","Web App","Authentication","Initial credentials for the users of the application shall be unique and the application shall enforce the users to modify their initial credentials.","Technical",True),
+    ("ECWASS-026","Web App","Authentication","Recovery tokens and initial credentials should be delivered over an encrypted side-channel to the affected users.","Questionnaire",False),
+    # --- Session Management ---
+    ("ECWASS-027","Web App","Session Management","Session IDs shall be unique and contain at least 128 bits of entropy so that brute-forcing or guessing the session ID of an authenticated user is not feasible.","Technical",True),
+    ("ECWASS-028","Web App","Session Management","Session IDs contents (or value) shall not contain meaningful data like username or e-mail address and other user's personal information.","Technical",True),
+    ("ECWASS-029","Web App","Session Management","Sessions IDs shall never be displayed in URLs, logs, and error messages.","Technical",True),
+    ("ECWASS-030","Web App","Session Management","Session IDs stored in cookies shall have the \"Secure\" flag set to prevent the browser from sending the cookie over an unsecured channel.","Technical",True),
+    ("ECWASS-031","Web App","Session Management","Session IDs stored in cookies should have the domain attribute blank to avoid that the cookie is also sent to subdomains.","Technical",False),
+    ("ECWASS-032","Web App","Session Management","Session IDs stored in cookies shall have the path attribute set to the web directory path of the application that needs to receive the cookie rather than the root directory.","Technical",True),
+    ("ECWASS-033","Web App","Session Management","Session IDs stored in cookies shall have the \"HttpOnly\" flag set, thus making it impossible for an attacker to access this cookie by client-side APIs such as JavaScript.","Technical",True),
+    ("ECWASS-034","Web App","Session Management","Web application shall only accept cookies as a means for session ID exchange management, and shall ensure that no other exchange mechanism is possible.","Technical",True),
+    ("ECWASS-035","Web App","Session Management","Sessions shall be automatically terminated on the server when a user is no longer active for a specified amount of time.","Technical",True),
+    ("ECWASS-036","Web App","Session Management","Session idle timeouts should be no longer than 5 minutes for applications handling sensitive non-classified information and 30 minutes for the rest of the applications depending on a risk assessment.","Technical",False),
+    ("ECWASS-037","Web App","Session Management","Sessions shall be automatically terminated when the user logs out of the web application.","Technical",True),
+    ("ECWASS-038","Web App","Session Management","Sessions shall be automatically terminated on the client when the user closes the browser, by creating cookies without an expiration date.","Technical",True),
+    ("ECWASS-039","Web App","Session Management","Successful authentications shall generate a new session and therefore a new session ID.","Technical",True),
+    ("ECWASS-040","Web App","Session Management","Web applications shall use the session management features implementation from the selected web development framework, rather than building such mechanism from scratch.","Questionnaire",True),
+    # --- Access Control ---
+    ("ECWASS-041","Web App","Access Control","Access control checks performed at client-side shall also be checked at server-side.","Technical",True),
+    ("ECWASS-042","Web App","Access Control","Directory listing and browsing shall be disabled.","Technical",True),
+    ("ECWASS-043","Web App","Access Control","File or directory metadata in the web applications shall be sanitized.","Technical",True),
+    ("ECWASS-044","Web App","Access Control","The web application shall make use of anti-Cross Site Request Forgery (CSRF) tokens in order to prevent the user from executing unwanted actions on the web application they are currently authenticated to.","Technical",True),
+    ("ECWASS-045","Web App","Access Control","All user accounts and resources (such as processes) shall only have the lowest level of rights needed to perform their tasks.","Questionnaire",True),
+    ("ECWASS-046","Web App","Access Control","Unapproved self-registered accounts shall not be allowed to post any public contents.","Technical",True),
+    ("ECWASS-047","Web App","Access Control","Accounts supporting automated application functionalities should prevent interactive login, making it impossible to use these accounts for non-automated operations.","Questionnaire",False),
+    # --- Input Validation & Output Sanitization ---
+    ("ECWASS-048","Web App","Input validation & Output Sanitization","Input validation controls shall be implemented for every web application which allows a user to input data.","Technical",True),
+    ("ECWASS-049","Web App","Input validation & Output Sanitization","Input validation shall be performed at server-side.","Technical",True),
+    ("ECWASS-050","Web App","Input validation & Output Sanitization","Input validation should also be performed at client-side in addition to server-side checks.","Technical",False),
+    ("ECWASS-051","Web App","Input validation & Output Sanitization","The web application and all its backend services shall make use of a safe API that allows the use of a parameterized interface.","Questionnaire",True),
+    ("ECWASS-052","Web App","Input validation & Output Sanitization","If a parameterized API is not available, special characters shall be escaped using the specific escape syntax for that interpreter.","Technical",True),
+    ("ECWASS-053","Web App","Input validation & Output Sanitization","Web applications shall use development frameworks mechanisms for rendering content safely and escaping reserved characters.","Technical",True),
+    # --- Communication ---
+    ("ECWASS-054","Web App","Communication","Communication between applications and underlying services should be encrypted.","Questionnaire",False),
+    ("ECWASS-055","Web App","Communication","Communication of sensitive non-classified information between applications and underlying services shall be encrypted.","Questionnaire",True),
+    ("ECWASS-056","Web App","Communication","Web application shall make use of encrypted traffic for the entire web session on every web page including content from third party domains, in compliance with the SSL/TLS Technical Standard.","Technical",True),
+    ("ECWASS-057","Web App","Communication","All sensitive non-classified information shall be kept out of the URL.","Technical",True),
+    ("ECWASS-058","Web App","Communication","The HTTP Strict Transport Security (HSTS) header shall be set on all requests and for all subdomains.","Technical",True),
+    ("ECWASS-059","Web App","Communication","The HSTS header should be pre-loaded into browsers with a long max-age flag (ideally one year).","Technical",False),
+    ("ECWASS-060","Web App","Communication","Strong, non-deprecated algorithms, ciphers and protocols shall be used throughout the whole certificate hierarchy.","Technical",True),
+    ("ECWASS-061","Web App","Communication","Web facing applications shall use certificates delivered by a trusted Certificate Authority.","Technical",True),
+    ("ECWASS-062","Web App","Communication","Perfect Forward Secrecy shall be supported.","Technical",True),
+    ("ECWASS-063","Web App","Communication","The web application shall only accept the standard HTTP request methods (e.g. GET, POST). Other protocols or methods shall be blocked.","Technical",True),
+    ("ECWASS-064","Web App","Communication","All HTTP responses shall contain a Content-Type header with the correct MIME type.","Technical",True),
+    ("ECWASS-065","Web App","Communication","HTTP headers shall not disclose version or any other internal information about the underlying system or technology.","Technical",True),
+    ("ECWASS-066","Web App","Communication","Content Security Policy (CSP) header shall be used and strictly configured to prevent injections such as XSS or HTML injection.","Technical",True),
+    ("ECWASS-067","Web App","Communication","The X-XSS-Protection header shall be used in order to protect against reflected XSS attacks.","Technical",True),
+    ("ECWASS-068","Web App","Communication","The X-Frame-Options header shall be used in order to protect against clickjacking attacks","Technical",True),
+    # --- Data Protection ---
+    ("ECWASS-069","Web App","Data Protection","Forms handling sensitive non classified information shall not make use of autocomplete features for those fields of information and shall disable client-side caching.","Technical",True),
+    ("ECWASS-070","Web App","Data Protection","When filling out forms, sensitive non-classified information should be masked while typed. (e.g. *****)","Technical",False),
+    ("ECWASS-071","Web App","Data Protection","Data stored in client-side cache shall not contain any sensitive non-classified information.","Technical",True),
+    ("ECWASS-072","Web App","Data Protection","Sensitive non-classified information shall only be sent over HTTPS.","Technical",True),
+    ("ECWASS-073","Web App","Data Protection","All sensitive non-classified information maintained in memory should be overwritten with zeros or random data once it is no longer necessary to be kept in memory","Questionnaire",False),
+    # --- Secure Handling of Resources ---
+    ("ECWASS-074","Web App","Secure Handling of Resources","Data (e.g. files, variables) submitted by a user to the web application shall not be used as input for operating system commands.","Technical",True),
+    ("ECWASS-075","Web App","Secure Handling of Resources","Files uploaded by users shall not be stored under the web directory (webroot) of the webserver.","Technical",True),
+    ("ECWASS-076","Web App","Secure Handling of Resources","Uploaded files shall be scanned by antivirus software.","Questionnaire",True),
+    ("ECWASS-077","Web App","Secure Handling of Resources","The web application shall not execute files uploaded by the user.","Technical",True),
+    ("ECWASS-078","Web App","Secure Handling of Resources","All URL redirects shall be validated at the input time.","Technical",True),
+    ("ECWASS-079","Web App","Secure Handling of Resources","If URL redirects based on a pre-defined list (e.g. whitelist) of allowed domain is not possible, a warning shall be shown firstly to the users notifying them that they are going off of the site, and a link shall be clicked by them for confirmation.","Technical",True),
+    # --- Error & Exception Handling ---
+    ("ECWASS-080","Web App","Error & Exception Handling","Information provided in error messages shall be generic: it shall not reveal technical details about the underlying security or any other system internal mechanisms, except for a unique identifier which can be used in troubleshooting.","Technical",True),
+    # --- Logging ---
+    ("ECWASS-081","Web App","Logging","The web application shall log all necessary information (e.g. access control decisions) needed to begin a thorough investigation.","Questionnaire",True),
+    ("ECWASS-082","Web App","Logging","Authentication attempts, both successful and failed, shall be logged.","Questionnaire",True),
+    ("ECWASS-083","Web App","Logging","Access to sensitive non-classified information shall be logged.","Questionnaire",True),
+    ("ECWASS-084","Web App","Logging","Changes to web application configuration, including changes to privileges assigned to users and security parametrization, shall be logged.","Questionnaire",True),
+    ("ECWASS-085","Web App","Logging","Logs shall not include sensitive non-classified information.","Questionnaire",True),
+    ("ECWASS-086","Web App","Logging","Logs shall not be accessible to unauthorized users.","Questionnaire",True),
+    ("ECWASS-087","Web App","Logging","Controls shall be in place to prevent that logs are overwritten or tampered with.","Questionnaire",True),
+    # --- Deployment ---
+    ("ECWASS-102","Web App","Deployment","Debug mode shall be disabled in production.","Technical",True),
+    ("ECWASS-103","Web App","Deployment","For web applications handling, sensitive non-classified information, pseudonymization and/or anonymization of data shall be assured in the test environments.","Questionnaire",True),
+    ("ECWASS-104","Web App","Deployment","For web applications handling sensitive non-classified information, pseudonymization and/or anonymization of data should be assured in the acceptance environments.","Questionnaire",False),
+    ("ECWASS-105","Web App","Deployment","In accordance with the priority levels as described in IT Vulnerability Management Security Standard every web application shall undergo regularly a web application vulnerability assessment to identify common vulnerabilities.","Questionnaire",True),
+    ("ECWASS-106","Web App","Deployment","Important vulnerabilities based on a vulnerability assessment shall be fixed prior to going into production.","Questionnaire",True),
+    ("ECWASS-107","Web App","Deployment","If the web application handles sensitive non-classified information, a penetration test should be executed to find vulnerabilities in the web application.","Questionnaire",False),
+    ("ECWASS-108","Web App","Deployment","Test environments shall not be publicly accessible.","Technical",True),
+    # --- OS & Network / Host & Network Security ---
+    ("ECWASS-093","OS & Network","Host & Network Security","Communication between components (e.g. web application server - database server) shall require an authenticated connection, using an account with the least privileges necessary to operate.","Questionnaire",True),
+    ("ECWASS-094","OS & Network","Host & Network Security","The application and all underlying components and middleware shall run with minimal privileges and shall not use (default) administration accounts shipped with systems.","Questionnaire",True),
+    ("ECWASS-095","OS & Network","Host & Network Security","All hosts and software supporting the web application shall be updated timely after publication of security patches.","Questionnaire",True),
+    ("ECWASS-096","OS & Network","Host & Network Security","All hosts and software supporting the web application should be updated timely after publication of functional patches.","Questionnaire",False),
+    ("ECWASS-097","OS & Network","Host & Network Security","All management platforms that allow interaction with the hosts and software supporting the web application, including cloud consoles or similar management platforms, shall adhere to at least the same set of requirements as the actual web application and its supporting software.","Questionnaire",True),
+    ("ECWASS-098","OS & Network","Host & Network Security","Access to such management platforms shall be considered as privileged access, and the accounts for this shall adhere to applicable requirements of the Password Technical Specification and the Access Control and Authentication Standard.","Questionnaire",True),
+    ("ECWASS-099","OS & Network","Host & Network Security","Cloud Service Providers shall be able to support all the security requirements applicable to the web application.","Questionnaire",True),
+    # --- Network Security ---
+    ("ECWASS-100","Network","Network Security","External facing web applications shall be deployed in demilitarized zone (DMZ) to permit only limited connectivity to specific hosts in the internal network, reducing the attack surface.","Questionnaire",True),
+    ("ECWASS-101","Network","Network Security","External facing web application containing sensitive non-classified information shall be protected by a Web Application Firewall.","Questionnaire",True),
+]
+
+# Map id -> control dict for quick lookup
+CONTROL_MAP = {c[0]: {"id":c[0],"asset":c[1],"category":c[2],
+                       "requirement":c[3],"assess_type":c[4],"mandatory":c[5]}
+               for c in ALL_CONTROLS}
+
+
+# =============================================================================
+#  PASSIVE SCAN CHECK FUNCTIONS
+#  Signature: check_xxx(ecwass_id, resp_headers, req_headers, body, url,
+#                        messageInfo, helpers, callbacks) -> finding_dict | None
+# =============================================================================
+
+def _hdr(headers, name):
+    """Return header value (case-insensitive) or None."""
+    n = name.lower()
+    for h in headers:
+        if isinstance(h, str) and ":" in h and h.lower().startswith(n + ":"):
+            return h.split(":", 1)[1].strip()
+    return None
+
+def _has(headers, name):
+    return _hdr(headers, name) is not None
+
+def _status(resp_headers):
+    for h in resp_headers:
+        if isinstance(h, str) and h.startswith("HTTP/"):
+            parts = h.split()
+            if len(parts) >= 2:
+                try: return int(parts[1])
+                except: pass
+    return 0
+
+def _finding(ecwass_id, title, severity, url, detail, body_snippet=""):
+    ctrl = CONTROL_MAP.get(ecwass_id, {})
+    return {
+        "ts":         datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "id":         ecwass_id,
+        "category":   ctrl.get("category",""),
+        "assess_type":ctrl.get("assess_type","Technical"),
+        "mandatory":  "Yes" if ctrl.get("mandatory") else "No",
+        "title":      title,
+        "severity":   severity,
+        "url":        str(url),
+        "detail":     detail,
+        "requirement":ctrl.get("requirement",""),
+        "body_snippet": body_snippet,
+        "req_hdrs":     "",
+        "resp_hdrs":    "",
+    }
+
+# ---------------------------------------------------------------------------
+# Individual checks - mapped to ECWASS ID(s) they cover
+# ---------------------------------------------------------------------------
+
+
+def _body_snippet(body, pattern, context=80, maxlen=300):
+    """Return up to maxlen chars around the first regex match in body."""
+    try:
+        m = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
+        if not m:
+            return ""
+        start = max(0, m.start() - context)
+        end   = min(len(body), m.end() + context)
+        raw   = body[start:end].strip()
+        raw   = re.sub(r"[ \t]+", " ", raw)
+        if len(raw) > maxlen:
+            raw = raw[:maxlen] + " ..."
+        return raw
+    except Exception:
+        return ""
+
+# Snippet patterns as constants
+_PAT_E005  = r'<object[^>]+classid|<applet\b|\.swf["\'\s>]|x-shockwave-flash|x-silverlight|vbscript\s*:'
+_PAT_E017  = r'(wrong|invalid|incorrect)\s+password|(user|account|email).{0,30}(not found|does not exist|unknown)|stack\s?trace|SQLSTATE'
+_PAT_E021  = r'\b(checkAuth|isLoggedIn|isAuthenticated|validateToken)\s*\('
+_PAT_E029  = r'[Ss]ession[-_]?[Ii][Dd]|JSESSIONID|PHPSESSID'
+_PAT_E042  = r'Index of\s+/|directory\s+listing|Parent Directory'
+_PAT_E044  = r'<form|<input'
+_PAT_E048  = r'<input|<textarea|<select'
+_PAT_E056  = r'<img[^>]+src\s*=\s*["\']http://|src\s*=\s*["\']http://'
+_PAT_E064  = r'Content-Security-Policy'
+_PAT_E080  = r'exception|traceback|stack.?trace|ORA-\d{5}|SQLSTATE|Warning|Fatal error'
+_PAT_E102  = r'werkzeug\s+debugger|django\.debug|flask\s+debug|Traceback \(most recent call last\)|sf-toolbar|DEBUG\s*=\s*True'
+_PAT_E108  = r'test|staging|dev|uat|qa'
+
+
+def check_ECWASS_005_006(rh, qh, body, url, mi, h, cb):
+    pats = [
+        (r'<object[^>]+classid\s*=\s*["\']clsid:', "ActiveX"),
+        (r'<applet\b',                               "Java Applet"),
+        (r'\.swf["\'\s>]',                           "Flash (SWF)"),
+        (r'application/x-shockwave-flash',           "Flash embed"),
+        (r'application/x-silverlight',               "Silverlight"),
+        (r'vbscript\s*:',                            "VBScript"),
+    ]
+    found = [lbl for pat,lbl in pats if re.search(pat, body, re.IGNORECASE)]
+    if found:
+        return _finding("ECWASS-005","Deprecated/Unsupported Client-Side Technology","High",url,
+            "Detected deprecated technology: %s. Flash, ActiveX, Applets, Silverlight and VBScript are end-of-life." % ", ".join(found),
+            body_snippet=_body_snippet(body, _PAT_E005))
+    return None
+
+def check_ECWASS_017_018(rh, qh, body, url, mi, h, cb):
+    us = str(url).lower()
+    if not any(k in us for k in ["login","auth","signin","password","logon","account"]):
+        return None
+    found = []
+    if re.search(r'(wrong|invalid|incorrect)\s+password', body, re.IGNORECASE):
+        found.append("Response distinguishes wrong password (account existence leak)")
+    if re.search(r'(user|account|email).{0,30}(not found|does not exist|unknown)', body, re.IGNORECASE):
+        found.append("Response reveals account non-existence")
+    if re.search(r'(stack\s?trace|exception|ORA-\d|SQLSTATE)', body, re.IGNORECASE):
+        found.append("Technical error/stack trace exposed in auth response")
+    if found:
+        return _finding("ECWASS-017","Auth Error Message Discloses Sensitive Information","Medium",url,
+            "\n- ".join(found) + "\nAuth error messages shall be generic.",
+            body_snippet=_body_snippet(body, _PAT_E017))
+    return None
+
+def check_ECWASS_021(rh, qh, body, url, mi, h, cb):
+    if _status(rh) == 200:
+        if re.search(r'\b(checkAuth|isLoggedIn|isAuthenticated|validateToken)\s*\(', body, re.IGNORECASE):
+            if not re.search(r'(window\.location|location\.href|location\.replace)', body, re.IGNORECASE):
+                return _finding("ECWASS-021","Possible Client-Side-Only Auth Check","High",url,
+                    "Page returns 200 and contains client-side auth functions with no server-side redirect. "
+                    "Authentication controls shall be checked on the server side.",
+            body_snippet=_body_snippet(body, _PAT_E021))
+    return None
+
+def check_ECWASS_022(rh, qh, body, url, mi, h, cb):
+    if str(url.getProtocol()).lower() != "https":
+        us = str(url).lower()
+        if any(k in us for k in ["login","auth","signin","password","logon"]):
+            return _finding("ECWASS-022","Credentials Submitted Over HTTP","High",url,
+                "Authentication endpoint is served over plain HTTP. Credentials shall be sent over HTTPS only.")
+    return None
+
+def check_ECWASS_027(rh, qh, body, url, mi, h, cb):
+    issues = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=([^;]*)', val)
+            if not m: continue
+            name, value = m.group(1).strip(), m.group(2).strip()
+            is_sess = any(s in name.lower() for s in ["sess","sid","session","token","auth","jsessionid","phpsessid"])
+            if is_sess and len(value) < 16:
+                issues.append("Cookie '%s': value too short (%d chars) - likely insufficient entropy" % (name, len(value)))
+    if issues:
+        return _finding("ECWASS-027","Session ID May Have Insufficient Entropy","High",url,
+            "\n- ".join(issues) + "\nSession IDs shall contain at least 128 bits of entropy.")
+    return None
+
+def check_ECWASS_028(rh, qh, body, url, mi, h, cb):
+    issues = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=([^;]*)', val)
+            if not m: continue
+            name, value = m.group(1).strip(), m.group(2).strip()
+            is_sess = any(s in name.lower() for s in ["sess","sid","session","token"])
+            if is_sess:
+                try: decoded = urllib.unquote(str(value))
+                except: decoded = str(value)
+                if re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', decoded):
+                    issues.append("Cookie '%s' appears to embed an email address" % name)
+                if re.search(r'(username|email|user|name)=', decoded, re.IGNORECASE):
+                    issues.append("Cookie '%s' contains a name/email key=value pair" % name)
+    if issues:
+        return _finding("ECWASS-028","Session ID Contains Personal Data","High",url,
+            "\n- ".join(issues) + "\nSession IDs shall not contain meaningful user data.")
+    return None
+
+def check_ECWASS_029(rh, qh, body, url, mi, h, cb):
+    us = str(url)
+    m = re.search(r'[?&](sessid|session_id|sid|JSESSIONID|PHPSESSID|ASP\.NET_SessionId|token)=([^&]+)',
+                  us, re.IGNORECASE)
+    if m:
+        return _finding("ECWASS-029","Session ID Exposed in URL","High",url,
+            "Parameter '%s' found in URL. Session IDs shall never appear in URLs." % m.group(1),
+            body_snippet=_body_snippet(body, _PAT_E029))
+    m2 = re.search(r'href=["\'][^"\']*[?&](JSESSIONID|PHPSESSID|ASP\.NET_SessionId)=', body, re.IGNORECASE)
+    if m2:
+        return _finding("ECWASS-029","Session ID Exposed in Href Links","High",url,
+            "Session ID '%s' found in page hrefs. Session IDs shall never appear in URLs." % m2.group(1))
+    return None
+
+def check_ECWASS_030(rh, qh, body, url, mi, h, cb):
+    missing = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=', val)
+            name = m.group(1).strip() if m else "unknown"
+            if "secure" not in val.lower():
+                missing.append(name)
+    if missing:
+        return _finding("ECWASS-030","Cookie Missing 'Secure' Flag","High",url,
+            "Cookies without Secure flag:\n- " + "\n- ".join(missing))
+    return None
+
+def check_ECWASS_031(rh, qh, body, url, mi, h, cb):
+    issues = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=', val)
+            name = m.group(1).strip() if m else "unknown"
+            is_sess = any(s in name.lower() for s in ["sess","sid","session","token","auth"])
+            if is_sess:
+                dm = re.search(r'domain\s*=\s*([^;]+)', val, re.IGNORECASE)
+                if dm and dm.group(1).strip():
+                    issues.append("Cookie '%s' has domain='%s' set - may be sent to subdomains" % (name, dm.group(1).strip()))
+    if issues:
+        return _finding("ECWASS-031","Session Cookie Domain Attribute Set","Low",url,
+            "\n- ".join(issues) + "\nSession cookie domain should be blank to avoid sending to subdomains.")
+    return None
+
+def check_ECWASS_032(rh, qh, body, url, mi, h, cb):
+    issues = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=', val)
+            name = m.group(1).strip() if m else "unknown"
+            pm = re.search(r'path\s*=\s*([^;]+)', val, re.IGNORECASE)
+            if not pm:
+                issues.append("Cookie '%s': no path attribute" % name)
+            elif pm.group(1).strip() == "/":
+                issues.append("Cookie '%s': path='/' - should be restricted to app path" % name)
+    if issues:
+        return _finding("ECWASS-032","Cookie Path Not Restricted","Low",url,
+            "\n- ".join(issues) + "\nCookies shall have path scoped to the application directory.")
+    return None
+
+def check_ECWASS_033(rh, qh, body, url, mi, h, cb):
+    missing = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=', val)
+            name = m.group(1).strip() if m else "unknown"
+            if "httponly" not in val.lower():
+                missing.append(name)
+    if missing:
+        return _finding("ECWASS-033","Cookie Missing 'HttpOnly' Flag","High",url,
+            "Cookies without HttpOnly:\n- " + "\n- ".join(missing) +
+            "\nWithout HttpOnly, JS can read the cookie via document.cookie.")
+    return None
+
+def check_ECWASS_038(rh, qh, body, url, mi, h, cb):
+    issues = []
+    for hdr in rh:
+        if not isinstance(hdr, str): continue
+        if hdr.lower().startswith("set-cookie:"):
+            val = hdr.split(":",1)[1]
+            m = re.match(r'\s*([^=]+)=', val)
+            name = m.group(1).strip() if m else "unknown"
+            is_sess = any(s in name.lower() for s in ["sess","sid","session","token","auth"])
+            if is_sess:
+                if re.search(r'max-age\s*=\s*\d+', val, re.IGNORECASE) or \
+                   re.search(r'expires\s*=', val, re.IGNORECASE):
+                    issues.append("Session cookie '%s' has Max-Age/Expires - persists after browser close" % name)
+    if issues:
+        return _finding("ECWASS-038","Session Cookie Has Persistent Expiry","Medium",url,
+            "\n- ".join(issues) + "\nSession cookies shall expire on browser close (no Max-Age/Expires).")
+    return None
+
+def check_ECWASS_042(rh, qh, body, url, mi, h, cb):
+    if re.search(r'Index of\s+/', body) or \
+       re.search(r'<title>[^<]*directory\s+listing', body, re.IGNORECASE) or \
+       re.search(r'Parent Directory</a>', body):
+        return _finding("ECWASS-042","Directory Listing Enabled","High",url,
+            "Server appears to have directory listing enabled. It shall be disabled.",
+            body_snippet=_body_snippet(body, _PAT_E042))
+    return None
+
+def check_ECWASS_044(rh, qh, body, url, mi, h, cb):
+    if not re.search(r'<form\b', body, re.IGNORECASE): return None
+    if not re.search(r'method\s*=\s*["\']?\s*post', body, re.IGNORECASE): return None
+    has_csrf = (re.search(r'csrf', body, re.IGNORECASE) or
+                re.search(r'_token', body, re.IGNORECASE) or
+                re.search(r'__RequestVerificationToken', body, re.IGNORECASE) or
+                re.search(r'authenticity_token', body, re.IGNORECASE) or
+                _has(rh, "X-CSRF-Token"))
+    if not has_csrf:
+        return _finding("ECWASS-044","Missing Anti-CSRF Token","High",url,
+            "POST form found but no CSRF token detected. "
+            "Anti-CSRF tokens shall be used in all state-changing requests.")
+    return None
+
+def check_ECWASS_048_049(rh, qh, body, url, mi, h, cb):
+    if not re.search(r'<form\b', body, re.IGNORECASE): return None
+    if not re.search(r'<input\b', body, re.IGNORECASE): return None
+    # Heuristic: form with inputs but no visible validation patterns
+    has_novalidate = re.search(r'novalidate', body, re.IGNORECASE)
+    has_pattern    = re.search(r'pattern\s*=', body, re.IGNORECASE)
+    has_required   = re.search(r'\brequired\b', body, re.IGNORECASE)
+    if has_novalidate and not has_pattern and not has_required:
+        return _finding("ECWASS-048","Input Validation May Be Missing","Medium",url,
+            "Form with 'novalidate' and no pattern/required attributes detected. "
+            "Input validation controls shall be implemented for every web application that accepts user input.")
+    return None
+
+def check_ECWASS_056(rh, qh, body, url, mi, h, cb):
+    if str(url.getProtocol()).lower() != "https": return None
+    mixed = re.findall(r'(?:src|href|action)\s*=\s*["\']http://[^"\']+', body, re.IGNORECASE)
+    if mixed:
+        return _finding("ECWASS-056","Mixed Content Detected","High",url,
+            "HTTPS page loads %d resource(s) over HTTP:\n- " % len(mixed) +
+            "\n- ".join(mixed[:8]) + "\nAll resources shall be loaded over HTTPS.")
+    return None
+
+def check_ECWASS_057(rh, qh, body, url, mi, h, cb):
+    us = str(url)
+    params = us.split("?",1)[1] if "?" in us else ""
+    if not params: return None
+    sensitive = ["password","passwd","pwd","secret","token","api_key","apikey",
+                 "ssn","creditcard","cc","cvv","pin","private_key","access_token"]
+    found = [k for k in sensitive if re.search(r'\b'+k+r'\b', params, re.IGNORECASE)]
+    if found:
+        return _finding("ECWASS-057","Sensitive Parameter in URL","High",url,
+            "Sensitive parameters in URL query string: " + ", ".join(found) +
+            "\nSensitive information shall be kept out of URLs.")
+    return None
+
+def check_ECWASS_058_059(rh, qh, body, url, mi, h, cb):
+    if str(url.getProtocol()).lower() != "https": return None
+    hsts = _hdr(rh, "Strict-Transport-Security")
+    if not hsts:
+        return _finding("ECWASS-058","Missing HSTS Header","High",url,
+            "Strict-Transport-Security header is absent. HSTS shall be set on all HTTPS responses.")
+    if "includesubdomains" not in hsts.lower():
+        return _finding("ECWASS-058","HSTS Missing includeSubDomains","Medium",url,
+            "HSTS present but missing 'includeSubDomains': " + hsts)
+    # ECWASS-059: max-age should be >= 1 year (31536000)
+    ma = re.search(r'max-age\s*=\s*(\d+)', hsts, re.IGNORECASE)
+    if ma and int(ma.group(1)) < 31536000:
+        return _finding("ECWASS-059","HSTS max-age Below Recommended One Year","Low",url,
+            "HSTS max-age=%s. Should be at least 31536000 (1 year) with preload." % ma.group(1))
+    return None
+
+def check_ECWASS_063(rh, qh, body, url, mi, h, cb):
+    allow = _hdr(rh, "Allow") or ""
+    if not allow: allow = _hdr(rh, "Public") or ""
+    dangerous = ["TRACE","TRACK","DELETE","PUT","CONNECT","OPTIONS","PATCH",
+                 "PROPFIND","PROPPATCH","MKCOL","MOVE","COPY"]
+    found = [m for m in dangerous if re.search(r'\b'+m+r'\b', allow.upper())]
+    if found:
+        return _finding("ECWASS-063","Non-Standard HTTP Methods Allowed","Medium",url,
+            "Allow header permits: " + ", ".join(found) +
+            "\nOnly standard methods (GET, POST) shall be permitted.")
+    return None
+
+def check_ECWASS_064(rh, qh, body, url, mi, h, cb):
+    ct = _hdr(rh, "Content-Type")
+    if not ct:
+        return _finding("ECWASS-064","Missing Content-Type Header","Medium",url,
+            "Response has no Content-Type header. All responses shall declare the correct MIME type.")
+    if ct.startswith("text/") and "charset" not in ct.lower():
+        return _finding("ECWASS-064","Content-Type Missing Charset","Low",url,
+            "Content-Type '%s' is missing charset. This can enable MIME/charset sniffing." % ct)
+    return None
+
+def check_ECWASS_065(rh, qh, body, url, mi, h, cb):
+    disc = []
+    for hn in ["Server","X-Powered-By","X-AspNet-Version","X-AspNetMvc-Version",
+               "X-Generator","X-Runtime","X-Version","X-Drupal-Cache","X-Joomla-Version"]:
+        val = _hdr(rh, hn)
+        if val:
+            disc.append("%s: %s" % (hn, val))
+    if disc:
+        return _finding("ECWASS-065","Technology/Version Disclosed in Headers","Low",url,
+            "Response headers reveal server/framework details:\n- " + "\n- ".join(disc) +
+            "\nHTTP headers shall not disclose version or internal system information.")
+    return None
+
+def check_ECWASS_066(rh, qh, body, url, mi, h, cb):
+    csp = _hdr(rh, "Content-Security-Policy")
+    if not csp:
+        csp_ro = _hdr(rh, "Content-Security-Policy-Report-Only")
+        if csp_ro:
+            return _finding("ECWASS-066","CSP in Report-Only Mode","Medium",url,
+                "CSP-Report-Only is set but not enforced. Use Content-Security-Policy in production.")
+        return _finding("ECWASS-066","Missing Content-Security-Policy Header","High",url,
+            "No CSP header. CSP shall be strictly configured to prevent XSS/HTML injection.")
+    weak = []
+    if "'unsafe-inline'" in csp: weak.append("'unsafe-inline'")
+    if "'unsafe-eval'" in csp:   weak.append("'unsafe-eval'")
+    if re.search(r'\*\s', csp) or csp.endswith("*"): weak.append("wildcard (*)")
+    if "default-src" not in csp and "script-src" not in csp:
+        weak.append("no default-src or script-src directive")
+    if weak:
+        return _finding("ECWASS-066","Weak Content-Security-Policy","Medium",url,
+            "CSP present but contains weak directives: " + ", ".join(weak) +
+            "\nCSP shall be strictly configured.")
+    return None
+
+def check_ECWASS_067(rh, qh, body, url, mi, h, cb):
+    val = _hdr(rh, "X-XSS-Protection")
+    if not val:
+        return _finding("ECWASS-067","Missing X-XSS-Protection Header","Low",url,
+            "X-XSS-Protection header absent. Set to '1; mode=block' to enable browser XSS filter.")
+    if val.strip() == "0":
+        return _finding("ECWASS-067","X-XSS-Protection Disabled","Medium",url,
+            "X-XSS-Protection: 0 explicitly disables the browser XSS filter.")
+    return None
+
+def check_ECWASS_068(rh, qh, body, url, mi, h, cb):
+    xfo = _hdr(rh, "X-Frame-Options")
+    csp = _hdr(rh, "Content-Security-Policy") or ""
+    if not xfo and "frame-ancestors" not in csp.lower():
+        return _finding("ECWASS-068","Missing X-Frame-Options / frame-ancestors","High",url,
+            "Neither X-Frame-Options nor CSP frame-ancestors is set. "
+            "Application is vulnerable to clickjacking.")
+    if xfo and xfo.upper() not in ("DENY","SAMEORIGIN") and \
+       not xfo.upper().startswith("ALLOW-FROM"):
+        return _finding("ECWASS-068","Invalid X-Frame-Options Value","Medium",url,
+            "Unexpected X-Frame-Options value: '%s'. Valid: DENY, SAMEORIGIN, ALLOW-FROM." % xfo)
+    return None
+
+def check_ECWASS_069(rh, qh, body, url, mi, h, cb):
+    issues = []
+    # Check password inputs without autocomplete=off
+    pwd_inputs = re.findall(r'<input[^>]+type\s*=\s*["\']?password[^>]*>', body, re.IGNORECASE)
+    for inp in pwd_inputs:
+        if "autocomplete" not in inp.lower():
+            issues.append("Password <input> missing autocomplete='off'")
+    # Check forms containing password with no autocomplete on form
+    forms = re.findall(r'<form[^>]*>[\s\S]{0,2000}?</form>', body, re.IGNORECASE)
+    for frm in forms:
+        if re.search(r'type\s*=\s*["\']?password', frm, re.IGNORECASE):
+            if "autocomplete" not in frm[:frm.find(">")].lower():
+                issues.append("Form containing password field missing autocomplete='off' on <form>")
+    if issues:
+        return _finding("ECWASS-069","Autocomplete Enabled on Sensitive Fields","Low",url,
+            "\n- ".join(list(set(issues))) +
+            "\nAutocomplete shall be disabled on sensitive form fields.")
+    return None
+
+def check_ECWASS_070(rh, qh, body, url, mi, h, cb):
+    # Check for text-type inputs where type should be password (masking)
+    # Heuristic: input named 'password' or 'passwd' but type='text'
+    m = re.search(r'<input[^>]+type\s*=\s*["\']?text["\']?[^>]+name\s*=\s*["\']?(password|passwd|pwd)["\']?',
+                  body, re.IGNORECASE)
+    if m:
+        return _finding("ECWASS-070","Sensitive Field Not Masked (type=text)","Low",url,
+            "An input field named 'password/passwd/pwd' uses type='text' instead of type='password'. "
+            "Sensitive fields should be masked while typed.")
+    return None
+
+def check_ECWASS_071(rh, qh, body, url, mi, h, cb):
+    us = str(url).lower()
+    sensitive_path = any(k in us for k in ["account","profile","admin","dashboard",
+                                            "payment","personal","private","secure","portal"])
+    if sensitive_path:
+        cc = _hdr(rh, "Cache-Control") or ""
+        if "no-store" not in cc.lower() and "no-cache" not in cc.lower():
+            return _finding("ECWASS-071","Sensitive Page Not Excluded from Cache","Medium",url,
+                "Sensitive page lacks Cache-Control: no-store. Current: '%s'. "
+                "Client-side cache shall not contain sensitive information." % cc)
+    return None
+
+def check_ECWASS_072(rh, qh, body, url, mi, h, cb):
+    if str(url.getProtocol()).lower() == "https": return None
+    if re.search(r'(credit.?card|ssn|social.?security|password|passwd)', body, re.IGNORECASE):
+        return _finding("ECWASS-072","Sensitive Information Over HTTP","High",url,
+            "Page served over HTTP appears to contain sensitive fields. "
+            "Sensitive information shall only be sent over HTTPS.")
+    return None
+
+def check_ECWASS_075(rh, qh, body, url, mi, h, cb):
+    us = str(url).lower()
+    if "upload" in us or "file" in us:
+        m = re.search(r'(?:src|href|url)\s*[=:]\s*["\']?(/[^"\'>\s]*(?:upload|files?|media)[^"\'>\s]*)',
+                      body, re.IGNORECASE)
+        if m:
+            return _finding("ECWASS-075","Uploaded File Accessible Under Webroot","High",url,
+                "Response references uploaded file at webroot path: " + m.group(1) +
+                "\nUploaded files shall not be stored under the webroot.")
+    return None
+
+def check_ECWASS_078_079(rh, qh, body, url, mi, h, cb):
+    us = str(url)
+    m = re.search(r'[?&](redirect|next|return|url|goto|redir|target|dest|destination)\s*=\s*([^&]+)',
+                  us, re.IGNORECASE)
+    if m:
+        try: rval = urllib.unquote(str(m.group(2)))
+        except: rval = str(m.group(2))
+        if rval.startswith("http") or rval.startswith("//"):
+            return _finding("ECWASS-078","Potential Open Redirect","High",url,
+                "Redirect parameter '%s' points to external URL: %s\n"
+                "All URL redirects shall be validated against a whitelist." % (m.group(1), rval[:120]))
+    return None
+
+def check_ECWASS_080(rh, qh, body, url, mi, h, cb):
+    st = _status(rh)
+    if st < 400: return None
+    issues = []
+    if re.search(r'(Traceback \(most recent call last\)|stack\s?trace|at\s+[\w\.]+\([\w\.]+:\d+\))', body, re.IGNORECASE):
+        issues.append("Stack trace exposed")
+    if re.search(r'[A-Za-z]+Exception\b', body):
+        issues.append("Exception class name exposed")
+    if re.search(r'(mysql_|pg_|mysqli_|ORA-\d{5}|SQLSTATE)', body, re.IGNORECASE):
+        issues.append("Database error detail exposed")
+    if re.search(r'(/home/[a-z]+/|/var/www/|/usr/local/|C:\\inetpub|D:\\wwwroot)', body):
+        issues.append("Server filesystem path exposed")
+    if re.search(r'<b>(?:Fatal error|Warning|Notice)</b>.*?on line \d+', body):
+        issues.append("PHP debug output exposed")
+    if issues:
+        return _finding("ECWASS-080","Error Message Reveals Technical Detail","Medium",url,
+            "HTTP %d response reveals internal details:\n- " % st +
+            "\n- ".join(issues) + "\nError messages shall be generic.",
+            body_snippet=_body_snippet(body, _PAT_E080))
+    return None
+
+def check_ECWASS_102(rh, qh, body, url, mi, h, cb):
+    indicators = []
+    if re.search(r'(werkzeug\s+debugger|django\.debug\s*=\s*true|flask\s+debug)', body, re.IGNORECASE):
+        indicators.append("Python/Flask/Django debug UI detected")
+    if _hdr(rh, "X-Debug-Token") or _hdr(rh, "X-Debug-Token-Link"):
+        indicators.append("Symfony Profiler debug headers present")
+    if re.search(r'<div\s+id=["\']sf-toolbar', body, re.IGNORECASE):
+        indicators.append("Symfony debug toolbar in response")
+    if re.search(r'Traceback \(most recent call last\)', body):
+        indicators.append("Python traceback (debug mode) in response")
+    if re.search(r'<b>(?:Fatal error|Warning)</b>.*?on line \d+', body):
+        indicators.append("PHP error output in response")
+    if re.search(r'<div\s+class=["\'](?:debugInfo|debug-info|errorExplain)', body, re.IGNORECASE):
+        indicators.append("Debug info div detected in response")
+    if indicators:
+        return _finding("ECWASS-102","Debug Mode Enabled in Production","High",url,
+            "\n- ".join(indicators) + "\nDebug mode shall be disabled in production.",
+            body_snippet=_body_snippet(body, _PAT_E102))
+    return None
+
+def check_ECWASS_108(rh, qh, body, url, mi, h, cb):
+    host = str(url.getHost()).lower()
+    patterns = ["test.","staging.","dev.","uat.","qa.","demo.","sandbox.",
+                ".test.",".staging.","-dev.","-test.","-uat.","-qa.","preprod."]
+    matched = [p for p in patterns if p in host]
+    if matched:
+        return _finding("ECWASS-108","Test/Staging Environment Publicly Accessible","High",url,
+            "Host '%s' appears to be a non-production environment (matched: %s) but is publicly reachable. "
+            "Test environments shall not be publicly accessible." % (host, ", ".join(matched)),
+            body_snippet=_body_snippet(body, _PAT_E108))
+    return None
+
+# ---------------------------------------------------------------------------
+# Additional header checks for controls that need them
+# ---------------------------------------------------------------------------
+def check_ECWASS_061(rh, qh, body, url, mi, h, cb):
+    # Heuristic: X-Certificate-* or specific server banners suggesting self-signed
+    # Real check needs TLS inspection - flag for manual review
+    return None  # handled by Burp's built-in scanner
+
+def check_ECWASS_062(rh, qh, body, url, mi, h, cb):
+    # PFS needs TLS handshake analysis - flag heuristically via cipher header if present
+    return None  # handled by Burp's built-in scanner
+
+def check_ECWASS_060(rh, qh, body, url, mi, h, cb):
+    srv = _hdr(rh, "Server") or ""
+    if re.search(r'(SSLv2|SSLv3|TLSv1\.0|TLSv1\.1)', srv, re.IGNORECASE):
+        return _finding("ECWASS-060","Deprecated TLS Version Indicated","High",url,
+            "Server header indicates deprecated TLS/SSL: " + srv +
+            "\nOnly TLS 1.2+ with strong ciphers shall be used.")
+    return None
+
+
+# =============================================================================
+# Master dispatch table: ECWASS-ID -> check function
+# Only Technical checks are auto-dispatched; Questionnaire checks appear in
+# the manual checklist panel.
+# =============================================================================
+TECHNICAL_CHECKS = {
+    "ECWASS-005": check_ECWASS_005_006,
+    "ECWASS-006": check_ECWASS_005_006,
+    "ECWASS-017": check_ECWASS_017_018,
+    "ECWASS-018": check_ECWASS_017_018,
+    "ECWASS-021": check_ECWASS_021,
+    "ECWASS-022": check_ECWASS_022,
+    "ECWASS-027": check_ECWASS_027,
+    "ECWASS-028": check_ECWASS_028,
+    "ECWASS-029": check_ECWASS_029,
+    "ECWASS-030": check_ECWASS_030,
+    "ECWASS-031": check_ECWASS_031,
+    "ECWASS-032": check_ECWASS_032,
+    "ECWASS-033": check_ECWASS_033,
+    "ECWASS-038": check_ECWASS_038,
+    "ECWASS-042": check_ECWASS_042,
+    "ECWASS-044": check_ECWASS_044,
+    "ECWASS-048": check_ECWASS_048_049,
+    "ECWASS-049": check_ECWASS_048_049,
+    "ECWASS-056": check_ECWASS_056,
+    "ECWASS-057": check_ECWASS_057,
+    "ECWASS-058": check_ECWASS_058_059,
+    "ECWASS-059": check_ECWASS_058_059,
+    "ECWASS-060": check_ECWASS_060,
+    "ECWASS-063": check_ECWASS_063,
+    "ECWASS-064": check_ECWASS_064,
+    "ECWASS-065": check_ECWASS_065,
+    "ECWASS-066": check_ECWASS_066,
+    "ECWASS-067": check_ECWASS_067,
+    "ECWASS-068": check_ECWASS_068,
+    "ECWASS-069": check_ECWASS_069,
+    "ECWASS-070": check_ECWASS_070,
+    "ECWASS-071": check_ECWASS_071,
+    "ECWASS-072": check_ECWASS_072,
+    "ECWASS-075": check_ECWASS_075,
+    "ECWASS-078": check_ECWASS_078_079,
+    "ECWASS-079": check_ECWASS_078_079,
+    "ECWASS-080": check_ECWASS_080,
+    "ECWASS-102": check_ECWASS_102,
+    "ECWASS-108": check_ECWASS_108,
+}
+
+# De-duplicate: same function may appear under multiple IDs - only call it once per response
+_UNIQUE_CHECKS = list({fn.__name__: (ecid, fn) for ecid, fn in TECHNICAL_CHECKS.items()}.values())
+
+
+# =============================================================================
+# Table models (proper Jython subclasses - no anonymous class hack)
+# =============================================================================
+class _FindingsModel(DefaultTableModel):
+    def isCellEditable(self, row, col):
+        return False
+
+
+class _ControlsModel(DefaultTableModel):
+    def getColumnClass(self, col):
+        if col == 0:
+            return JBoolean
+        return DefaultTableModel.getColumnClass(self, col)
+
+    def isCellEditable(self, row, col):
+        return col == 0
+
+
+# =============================================================================
+# BurpExtender - main entry point
+# =============================================================================
+class BurpExtender(IBurpExtender, IScannerCheck, ITab,
+                   IContextMenuFactory, IHttpListener):
+
+    EXT_NAME = "ECWASS Security Scanner"
+
+    def registerExtenderCallbacks(self, callbacks):
+        self._cb      = callbacks
+        self._helpers = callbacks.getHelpers()
+        self._stdout  = PrintWriter(callbacks.getStdout(), True)
+        self._stderr  = PrintWriter(callbacks.getStderr(), True)
+        callbacks.setExtensionName(self.EXT_NAME)
+        callbacks.registerScannerCheck(self)
+        callbacks.registerContextMenuFactory(self)
+        callbacks.registerHttpListener(self)
+        self._enabled  = set(ecid for ecid, fn in _UNIQUE_CHECKS)
+        self._findings = []
+        self._seen     = set()
+        SwingUtilities.invokeLater(self._buildUI)
+        self._stdout.println("[ECWASS] Loaded. %d controls registered." % len(ALL_CONTROLS))
+
+    # -- ITab -----------------------------------------------------------------
+    def getTabCaption(self): return "ECWASS Scanner"
+    def getUiComponent(self): return self._root
+
+    # -- IHttpListener --------------------------------------------------------
+    def processHttpMessage(self, toolFlag, isRequest, messageInfo):
+        if isRequest: return
+        try:
+            for f in self._passiveScan(messageInfo):
+                self._addFinding(f)
+        except Exception as e:
+            self._stderr.println("[ECWASS] Listener error: " + str(e))
+
+    # -- IScannerCheck --------------------------------------------------------
+    def doPassiveScan(self, baseRequestResponse):
+        results = []
+        try:
+            for f in self._passiveScan(baseRequestResponse):
+                self._addFinding(f)
+                results.append(_BurpIssue(f, [baseRequestResponse],
+                                           baseRequestResponse.getHttpService()))
+        except Exception as e:
+            self._stderr.println("[ECWASS] Scan error: " + str(e))
+        return results
+
+    def doActiveScan(self, baseRequestResponse, insertionPoint):
+        return []
+
+    def consolidateDuplicateIssues(self, existing, new_issue):
+        return -1 if (existing.getIssueName() == new_issue.getIssueName() and
+                      str(existing.getUrl()) == str(new_issue.getUrl())) else 0
+
+    # -- IContextMenuFactory --------------------------------------------------
+    def createMenuItems(self, invocation):
+        menu = ArrayList()
+        item = JMenuItem("ECWASS: Scan Selected Request(s)")
+        item.addActionListener(self._ContextScanAction(self, invocation))
+        menu.add(item)
+        return menu
+
+    class _ContextScanAction(ActionListener):
+        def __init__(self, ext, inv):
+            self._ext = ext
+            self._inv = inv
+        def actionPerformed(self, event):
+            msgs = self._inv.getSelectedMessages()
+            if not msgs: return
+            count = 0
+            for msg in msgs:
+                for f in self._ext._passiveScan(msg):
+                    self._ext._addFinding(f)
+                    count += 1
+            JOptionPane.showMessageDialog(None,
+                "Scan complete. %d new finding(s) added." % count,
+                "ECWASS Scanner", JOptionPane.INFORMATION_MESSAGE)
+
+    # -- Core scan ------------------------------------------------------------
+    def _passiveScan(self, messageInfo):
+        findings = []
+        try:
+            response = messageInfo.getResponse()
+            if not response: return findings
+            aResp = self._helpers.analyzeResponse(response)
+            aReq  = self._helpers.analyzeRequest(
+                        messageInfo.getHttpService(), messageInfo.getRequest())
+            rh   = list(aResp.getHeaders())
+            qh   = list(aReq.getHeaders())
+            body = self._helpers.bytesToString(response[aResp.getBodyOffset():])
+            url  = self._helpers.analyzeRequest(messageInfo).getUrl()
+            seen_fns = set()
+            for ecid, fn in _UNIQUE_CHECKS:
+                if ecid not in self._enabled: continue
+                if fn in seen_fns: continue
+                seen_fns.add(fn)
+                try:
+                    result = fn(rh, qh, body, url, messageInfo,
+                                self._helpers, self._cb)
+                    if result:
+                        result["req_hdrs"]  = "\n".join(str(x) for x in qh)
+                        result["resp_hdrs"] = "\n".join(str(x) for x in rh)
+                        findings.append(result)
+                except Exception as ex:
+                    self._stderr.println("[ECWASS] Check %s error: %s" % (ecid, str(ex)))
+        except Exception as e:
+            self._stderr.println("[ECWASS] _passiveScan error: " + str(e))
+        return findings
+
+    # -- Finding management ---------------------------------------------------
+    def _addFinding(self, f):
+        key = f["id"] + "|" + f["url"]
+        if key in self._seen: return
+        self._seen.add(key)
+        self._findings.append(f)
+        SwingUtilities.invokeLater(self._refreshTable)
+
+    def clearFindings(self):
+        self._findings = []
+        self._seen     = set()
+        SwingUtilities.invokeLater(self._refreshTable)
+
+    # -- UI -------------------------------------------------------------------
+    def _buildUI(self):
+        self._root = JTabbedPane()
+        self._root.addTab("Findings",  self._buildFindingsPanel())
+        self._root.addTab("Controls",  self._buildControlsPanel())
+        self._cb.addSuiteTab(self)
+
+    def _buildFindingsPanel(self):
+        panel = JPanel(BorderLayout(4, 4))
+        panel.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6))
+
+        # -- Toolbar row 1: filter controls -----------------------------------
+        tb1 = JToolBar(); tb1.setFloatable(False)
+        tb1.add(JLabel("  ECWASS Security Scanner  "))
+        tb1.addSeparator()
+        self._filterField = JTextField(18)
+        tb1.add(JLabel(" Filter: ")); tb1.add(self._filterField)
+        tb1.addSeparator()
+
+        # Severity filter
+        sevs = ["All Severities", "High", "Medium", "Low", "Information"]
+        self._sevBox = JComboBox(Vector(sevs))
+        tb1.add(JLabel(" Severity: ")); tb1.add(self._sevBox)
+
+        # Mandatory filter
+        mands = ["All", "Mandatory Only", "Non-Mandatory"]
+        self._mandBox = JComboBox(Vector(mands))
+        tb1.add(JLabel(" Mandatory: ")); tb1.add(self._mandBox)
+
+        # Category filter
+        cats = ["All Categories"] + sorted(set(c[2] for c in ALL_CONTROLS))
+        self._catFilterBox = JComboBox(Vector(cats))
+        tb1.add(JLabel(" Category: ")); tb1.add(self._catFilterBox)
+
+        # Assess type filter
+        atypes = ["All Types", "Technical", "Questionnaire"]
+        self._typeBox = JComboBox(Vector(atypes))
+        tb1.add(JLabel(" Type: ")); tb1.add(self._typeBox)
+
+        # -- Toolbar row 2: action buttons ------------------------------------
+        tb2 = JToolBar(); tb2.setFloatable(False)
+        deleteBtn = JButton("Delete Selected")
+        clearBtn  = JButton("Clear All")
+        exportBtn = JButton("Export CSV")
+        deleteBtn.setToolTipText("Delete selected finding(s) from the list")
+        tb2.add(deleteBtn); tb2.addSeparator()
+        tb2.add(clearBtn); tb2.add(exportBtn)
+
+        topPanel = JPanel(BorderLayout())
+        topPanel.add(tb1, BorderLayout.NORTH)
+        topPanel.add(tb2, BorderLayout.SOUTH)
+        panel.add(topPanel, BorderLayout.NORTH)
+
+        cols = ["Time", "ID", "Category", "Mandatory", "Severity", "URL", "Title"]
+        self._tableModel = _FindingsModel(Vector(cols), 0)
+        self._table      = JTable(self._tableModel)
+        self._table.setSelectionMode(javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION)
+        self._sorter     = TableRowSorter(self._tableModel)
+        self._table.setRowSorter(self._sorter)
+        self._table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
+        self._table.setRowHeight(20)
+
+        cm = self._table.getColumnModel()
+        for i, w in enumerate([140, 110, 190, 70, 75, 280, 320]):
+            cm.getColumn(i).setPreferredWidth(w)
+
+        ren = self._SeverityRenderer()
+        for i in range(len(cols)):
+            cm.getColumn(i).setCellRenderer(ren)
+
+        self._detailArea = JTextArea()
+        self._detailArea.setEditable(False)
+        self._detailArea.setLineWrap(True)
+        self._detailArea.setWrapStyleWord(True)
+        self._detailArea.setFont(Font("Monospaced", Font.PLAIN, 11))
+
+        self._table.getSelectionModel().addListSelectionListener(
+            self._RowSelector(self))
+
+        split = JSplitPane(JSplitPane.VERTICAL_SPLIT,
+                           JScrollPane(self._table),
+                           JScrollPane(self._detailArea))
+        split.setResizeWeight(0.65)
+        panel.add(split, BorderLayout.CENTER)
+
+        deleteBtn.addActionListener(self._DeleteAction(self))
+        clearBtn.addActionListener(self._ClearAction(self))
+        exportBtn.addActionListener(self._ExportAction(self))
+        self._filterField.getDocument().addDocumentListener(self._FilterListener(self))
+        self._sevBox.addActionListener(self._ComboFilterAction(self))
+        self._mandBox.addActionListener(self._ComboFilterAction(self))
+        self._catFilterBox.addActionListener(self._ComboFilterAction(self))
+        self._typeBox.addActionListener(self._ComboFilterAction(self))
+        return panel
+
+    class _SeverityRenderer(DefaultTableCellRenderer):
+        _SEV = {"High": Color(0xFF6666), "Medium": Color(0xFFB266),
+                "Low": Color(0xFFFF99), "Information": Color(0xADD8E6)}
+        def getTableCellRendererComponent(self, tbl, val, sel, foc, row, col):
+            c = DefaultTableCellRenderer.getTableCellRendererComponent(
+                self, tbl, val, sel, foc, row, col)
+            if not sel:
+                mr  = tbl.convertRowIndexToModel(row)
+                sev = str(tbl.getModel().getValueAt(mr, 4))
+                c.setBackground(self._SEV.get(sev, Color.WHITE))
+            return c
+
+    class _RowSelector(ListSelectionListener):
+        def __init__(self, ext): self._ext = ext
+        def valueChanged(self, ev):
+            if ev.getValueIsAdjusting(): return
+            row = self._ext._table.getSelectedRow()
+            if row < 0: return
+            mr = self._ext._table.convertRowIndexToModel(row)
+            if mr >= len(self._ext._findings): return
+            f = self._ext._findings[mr]
+            txt = (
+                "ID          : %s\n"
+                "Category    : %s\n"
+                "Assess Type : %s\n"
+                "Mandatory   : %s\n"
+                "Severity    : %s\n"
+                "URL         : %s\n"
+                "\nFinding:\n%s\n"
+                "\nRequirement:\n%s" % (
+                    f.get("id",""), f.get("category",""),
+                    f.get("assess_type",""), f.get("mandatory",""),
+                    f.get("severity",""), f.get("url",""),
+                    f.get("detail",""), f.get("requirement",""))
+            )
+            if f.get("req_hdrs"):
+                txt += "\n\n---- Request Headers ----\n" + f.get("req_hdrs","")
+            if f.get("resp_hdrs"):
+                txt += "\n\n---- Response Headers ----\n" + f.get("resp_hdrs","")
+            if f.get("body_snippet"):
+                txt += "\n\n---- Body Snippet (evidence) ----\n" + f.get("body_snippet","")
+            self._ext._detailArea.setText(txt)
+            self._ext._detailArea.setCaretPosition(0)
+    class _ClearAction(ActionListener):
+        def __init__(self, ext): self._ext = ext
+        def actionPerformed(self, e): self._ext.clearFindings()
+
+    class _ExportAction(ActionListener):
+        def __init__(self, ext): self._ext = ext
+        def actionPerformed(self, e): self._ext._exportCSV()
+
+    class _DeleteAction(ActionListener):
+        def __init__(self, ext): self._ext = ext
+        def actionPerformed(self, e):
+            rows = self._ext._table.getSelectedRows()
+            if not rows or len(rows) == 0: return
+            model_rows = sorted(
+                [self._ext._table.convertRowIndexToModel(r) for r in rows],
+                reverse=True)
+            for mr in model_rows:
+                if mr < len(self._ext._findings):
+                    f = self._ext._findings[mr]
+                    key = f["id"] + "|" + f["url"]
+                    self._ext._seen.discard(key)
+                    del self._ext._findings[mr]
+            SwingUtilities.invokeLater(self._ext._refreshTable)
+            self._ext._detailArea.setText("")
+
+    class _ComboFilterAction(ActionListener):
+        def __init__(self, ext): self._ext = ext
+        def actionPerformed(self, e): self._ext._applyFilter()
+
+    class _FilterListener(DocumentListener):
+        def __init__(self, ext): self._ext = ext
+        def _a(self): self._ext._applyFilter()
+        def changedUpdate(self, e): self._a()
+        def insertUpdate(self, e):  self._a()
+        def removeUpdate(self, e):  self._a()
+
+    def _applyFilter(self):
+        filters = []
+        txt = self._filterField.getText().strip()
+        if txt:
+            try: filters.append(RowFilter.regexFilter("(?i)" + txt))
+            except Exception: pass
+        sev = str(self._sevBox.getSelectedItem())
+        if sev and sev != "All Severities":
+            try: filters.append(RowFilter.regexFilter("(?i)^" + sev + "$", 4))
+            except Exception: pass
+        mand = str(self._mandBox.getSelectedItem())
+        if mand == "Mandatory Only":
+            try: filters.append(RowFilter.regexFilter("^Yes$", 3))
+            except Exception: pass
+        elif mand == "Non-Mandatory":
+            try: filters.append(RowFilter.regexFilter("^No$", 3))
+            except Exception: pass
+        cat = str(self._catFilterBox.getSelectedItem())
+        if cat and cat != "All Categories":
+            try: filters.append(RowFilter.regexFilter("(?i)^" + re.escape(cat) + "$", 2))
+            except Exception: pass
+        atype = str(self._typeBox.getSelectedItem())
+        if atype and atype != "All Types":
+            # Type isn't in the findings table cols, but is in finding dict; filter via text search
+            try: filters.append(RowFilter.regexFilter("(?i)" + atype))
+            except Exception: pass
+        if not filters:
+            self._sorter.setRowFilter(None)
+        elif len(filters) == 1:
+            self._sorter.setRowFilter(filters[0])
+        else:
+            self._sorter.setRowFilter(RowFilter.andFilter(Arrays.asList(filters)))
+
+    def _refreshTable(self):
+        self._tableModel.setRowCount(0)
+        for f in self._findings:
+            self._tableModel.addRow(Vector([
+                f.get("ts",""), f.get("id",""), f.get("category",""),
+                f.get("mandatory",""), f.get("severity",""),
+                f.get("url",""), f.get("title",""),
+            ]))
+
+    def _exportCSV(self):
+        chooser = JFileChooser()
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        chooser.setSelectedFile(java.io.File("ecwass_findings_%s.csv" % ts))
+        if chooser.showSaveDialog(self._root) == JFileChooser.APPROVE_OPTION:
+            path = chooser.getSelectedFile().getAbsolutePath()
+            if not path.endswith(".csv"): path += ".csv"
+            try:
+                def esc(s): return '"' + str(s).replace('"', '""') + '"'
+                fos = FileOutputStream(path)
+                osw = OutputStreamWriter(fos, "UTF-8")
+                bw  = BufferedWriter(osw)
+                bw.write("Time,ID,Category,Mandatory,Severity,URL,Title,Detail,Requirement\n")
+                for f in self._findings:
+                    bw.write(",".join([
+                        esc(f.get("ts","")), esc(f.get("id","")),
+                        esc(f.get("category","")), esc(f.get("mandatory","")),
+                        esc(f.get("severity","")), esc(f.get("url","")),
+                        esc(f.get("title","")), esc(f.get("detail","")),
+                        esc(f.get("requirement","")),
+                    ]) + "\n")
+                bw.close()
+                JOptionPane.showMessageDialog(None,
+                    "Exported %d finding(s) to:\n%s" % (len(self._findings), path),
+                    "Export Complete", JOptionPane.INFORMATION_MESSAGE)
+            except Exception as ex:
+                JOptionPane.showMessageDialog(None, "Export failed: " + str(ex),
+                    "Export Error", JOptionPane.ERROR_MESSAGE)
+
+    def _buildControlsPanel(self):
+        outer = JPanel(BorderLayout(4, 4))
+        outer.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6))
+
+        tb = JToolBar(); tb.setFloatable(False)
+        allBtn   = JButton("Select All")
+        noneBtn  = JButton("Select None")
+        mandBtn  = JButton("Mandatory Only")
+        techBtn  = JButton("Technical Only")
+        applyBtn = JButton("  Apply Selection  ")
+        applyBtn.setBackground(Color(0x388E3C))
+        applyBtn.setForeground(Color.WHITE)
+
+        cats = ["All Categories"] + sorted(set(c[2] for c in ALL_CONTROLS))
+        self._catCombo   = JComboBox(Vector(cats))
+        self._ctrlSearch = JTextField(16)
+
+        tb.add(JLabel("  Category: ")); tb.add(self._catCombo)
+        tb.add(JLabel("  Search: ")); tb.add(self._ctrlSearch)
+        tb.addSeparator()
+        tb.add(allBtn); tb.add(noneBtn); tb.add(mandBtn); tb.add(techBtn)
+        tb.addSeparator(); tb.add(applyBtn)
+        outer.add(tb, BorderLayout.NORTH)
+
+        legend = JPanel()
+        legend.setLayout(BoxLayout(legend, BoxLayout.X_AXIS))
+        def mkLeg(color, text):
+            lbl = JLabel("  " + text + "  ")
+            lbl.setOpaque(True); lbl.setBackground(color)
+            lbl.setBorder(BorderFactory.createLineBorder(Color.GRAY))
+            return lbl
+        legend.add(mkLeg(Color(0xE8F5E9), "Technical (auto-scanned)"))
+        legend.add(JLabel("   "))
+        legend.add(mkLeg(Color(0xE3F2FD), "Questionnaire (manual)"))
+        legend.add(JLabel("   "))
+        legend.add(JLabel("Bold = Mandatory"))
+        outer.add(legend, BorderLayout.SOUTH)
+
+        ctrlCols = ["Active", "ID", "Category", "Type", "Mandatory", "Requirement"]
+        self._ctrlModel  = _ControlsModel(Vector(ctrlCols), 0)
+        self._ctrlTable  = JTable(self._ctrlModel)
+        self._ctrlSorter = TableRowSorter(self._ctrlModel)
+        self._ctrlTable.setRowSorter(self._ctrlSorter)
+        self._ctrlTable.setRowHeight(20)
+        self._ctrlTable.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
+
+        ccm = self._ctrlTable.getColumnModel()
+        for i, w in enumerate([50, 110, 190, 110, 75, 600]):
+            ccm.getColumn(i).setPreferredWidth(w)
+
+        cr = self._ControlsRenderer()
+        for i in range(1, len(ctrlCols)):
+            ccm.getColumn(i).setCellRenderer(cr)
+
+        for c in ALL_CONTROLS:
+            ecid, asset, cat, req, atype, mand = c
+            self._ctrlModel.addRow(Vector([
+                JBoolean(ecid in self._enabled),
+                ecid, cat, atype,
+                "Yes" if mand else "No", req
+            ]))
+
+        outer.add(JScrollPane(self._ctrlTable), BorderLayout.CENTER)
+
+        ext = self
+
+        class _AllL(ActionListener):
+            def actionPerformed(self, e):
+                for r in range(ext._ctrlModel.getRowCount()):
+                    ext._ctrlModel.setValueAt(JBoolean(True), r, 0)
+
+        class _NoneL(ActionListener):
+            def actionPerformed(self, e):
+                for r in range(ext._ctrlModel.getRowCount()):
+                    ext._ctrlModel.setValueAt(JBoolean(False), r, 0)
+
+        class _MandL(ActionListener):
+            def actionPerformed(self, e):
+                for r in range(ext._ctrlModel.getRowCount()):
+                    ext._ctrlModel.setValueAt(
+                        JBoolean(ext._ctrlModel.getValueAt(r, 4) == "Yes"), r, 0)
+
+        class _TechL(ActionListener):
+            def actionPerformed(self, e):
+                for r in range(ext._ctrlModel.getRowCount()):
+                    ext._ctrlModel.setValueAt(
+                        JBoolean(ext._ctrlModel.getValueAt(r, 3) == "Technical"), r, 0)
+
+        class _ApplyL(ActionListener):
+            def actionPerformed(self, e):
+                ext._enabled = set()
+                for r in range(ext._ctrlModel.getRowCount()):
+                    if ext._ctrlModel.getValueAt(r, 0):
+                        ext._enabled.add(str(ext._ctrlModel.getValueAt(r, 1)))
+                JOptionPane.showMessageDialog(None,
+                    "%d control(s) now active.\n"
+                    "(Technical = auto-scanned; Questionnaire = manual review)"
+                    % len(ext._enabled),
+                    "ECWASS Scanner", JOptionPane.INFORMATION_MESSAGE)
+
+        class _CatL(ActionListener):
+            def actionPerformed(self, e):
+                ext._applyCtrlFilter()
+
+        class _SearchL(DocumentListener):
+            def __init__(self, ext): self._ext = ext
+            def _d(self): self._ext._applyCtrlFilter()
+            def changedUpdate(self, e): self._d()
+            def insertUpdate(self, e):  self._d()
+            def removeUpdate(self, e):  self._d()
+
+        allBtn.addActionListener(_AllL())
+        noneBtn.addActionListener(_NoneL())
+        mandBtn.addActionListener(_MandL())
+        techBtn.addActionListener(_TechL())
+        applyBtn.addActionListener(_ApplyL())
+        self._catCombo.addActionListener(_CatL())
+        self._ctrlSearch.getDocument().addDocumentListener(_SearchL(self))
+        return outer
+
+    class _ControlsRenderer(DefaultTableCellRenderer):
+        def getTableCellRendererComponent(self, tbl, val, sel, foc, row, col):
+            c = DefaultTableCellRenderer.getTableCellRendererComponent(
+                self, tbl, val, sel, foc, row, col)
+            if not sel:
+                mr   = tbl.convertRowIndexToModel(row)
+                atyp = str(tbl.getModel().getValueAt(mr, 3))
+                mand = str(tbl.getModel().getValueAt(mr, 4))
+                c.setBackground(
+                    Color(0xE8F5E9) if atyp == "Technical" else Color(0xE3F2FD))
+                f = c.getFont()
+                c.setFont(f.deriveFont(Font.BOLD if mand == "Yes" else Font.PLAIN))
+            return c
+
+    def _applyCtrlFilter(self):
+        cat = str(self._catCombo.getSelectedItem())
+        txt = self._ctrlSearch.getText().strip()
+        filters = []
+        if cat and cat != "All Categories":
+            try: filters.append(RowFilter.regexFilter("(?i)^" + re.escape(cat) + "$", 2))
+            except Exception: pass
+        if txt:
+            try: filters.append(RowFilter.regexFilter("(?i)" + txt))
+            except Exception: pass
+        if not filters:
+            self._ctrlSorter.setRowFilter(None)
+        elif len(filters) == 1:
+            self._ctrlSorter.setRowFilter(filters[0])
+        else:
+            self._ctrlSorter.setRowFilter(RowFilter.andFilter(Arrays.asList(filters)))
+
+
+# =============================================================================
+# IScanIssue adapter
+# =============================================================================
+class _BurpIssue(IScanIssue):
+    _SEV_MAP = {"High":"High","Medium":"Medium","Low":"Low","Information":"Information"}
+
+    def __init__(self, finding, msgs, svc):
+        self._f = finding; self._msg = msgs; self._svc = svc
+
+    def getUrl(self):
+        try: return JavaURL(self._f["url"])
+        except: return None
+
+    def getIssueName(self):
+        return "[%s] %s" % (self._f["id"], self._f["title"])
+    def getIssueType(self):          return 0x08000000
+    def getSeverity(self):           return self._SEV_MAP.get(self._f["severity"], "Information")
+    def getConfidence(self):         return "Tentative"
+    def getIssueBackground(self):    return "ECWASS control: " + self._f.get("requirement","")
+    def getRemediationBackground(self): return "Remediate per ECWASS requirements."
+    def getIssueDetail(self):        return self._f.get("detail","")
+    def getRemediationDetail(self):  return None
+    def getHttpMessages(self):       return self._msg
+    def getHttpService(self):        return self._svc
